@@ -1,4 +1,4 @@
-import { Effect, Console, Config, Queue, Fiber, Ref, Schedule } from "effect"
+import { Effect, Console, Config, Queue, Fiber, Ref, Schedule, Logger, LogLevel } from "effect"
 import * as dgram from "node:dgram"
 import { NodeRuntime } from "@effect/platform-node"
 import { parseHeader, parseQuestions, getRecordTypeName } from "./dns-packet.js"
@@ -22,51 +22,66 @@ const createDNSProxy = (port: number, upstreamDNS: string, upstreamPort: number)
     
     // Add finalizers for cleanup
     yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         serverSocket.close()
         clientSocket.close()
-        console.log("DNS proxy stopped")
+        yield* Effect.logInfo("DNS proxy stopped")
       })
     )
     
     // Handle responses from upstream DNS
     clientSocket.on("error", (err) => {
-      console.error("Client socket error:", err)
+      Effect.logError("Client socket error", err).pipe(Effect.runPromise)
     })
     
     clientSocket.on("message", (responseBuffer, upstreamRinfo) => {
         Effect.gen(function* () {
-          try {
-            const header = yield* parseHeader(responseBuffer)
-            const queries = yield* Ref.get(pendingQueries)
-            const query = queries.get(header.id)
+          const header = yield* parseHeader(responseBuffer)
+          const queries = yield* Ref.get(pendingQueries)
+          const query = queries.get(header.id)
+          
+          if (query) {
+            const elapsed = Date.now() - query.timestamp
+            yield* Effect.logInfo("Response received", {
+              queryId: header.id,
+              elapsed: `${elapsed}ms`
+            })
             
-            if (query) {
-              const elapsed = Date.now() - query.timestamp
-              console.log(`Response for query ID ${header.id} (${elapsed}ms)`)
-              
-              // Forward response back to original client
+            // Forward response back to original client
+            yield* Effect.async<void, Error>((resume) => {
               serverSocket.send(responseBuffer, query.clientRinfo.port, query.clientRinfo.address, (err) => {
                 if (err) {
-                  console.error("Error forwarding response:", err)
+                  resume(Effect.fail(err))
                 } else {
-                  console.log(`Forwarded response to ${query.clientRinfo.address}:${query.clientRinfo.port}`)
+                  resume(Effect.succeed(undefined))
                 }
               })
-              
-              // Remove from pending queries
-              yield* Ref.update(pendingQueries, (map) => {
-                const newMap = new Map(map)
-                newMap.delete(header.id)
-                return newMap
-              })
-            } else {
-              console.warn(`Received response for unknown query ID: ${header.id}`)
-            }
-          } catch (error) {
-            console.error("Error processing upstream response:", error)
+            }).pipe(
+              Effect.tap(() => 
+                Effect.logInfo("Response forwarded", {
+                  to: `${query.clientRinfo.address}:${query.clientRinfo.port}`
+                })
+              ),
+              Effect.catchAll((err) => 
+                Effect.logError("Error forwarding response", err)
+              )
+            )
+            
+            // Remove from pending queries
+            yield* Ref.update(pendingQueries, (map) => {
+              const newMap = new Map(map)
+              newMap.delete(header.id)
+              return newMap
+            })
+          } else {
+            yield* Effect.logWarning("Received response for unknown query", {
+              queryId: header.id
+            })
           }
         }).pipe(
+          Effect.catchAll((error) =>
+            Effect.logError("Error processing upstream response", error)
+          ),
           Effect.runPromise
         )
     })
@@ -74,55 +89,75 @@ const createDNSProxy = (port: number, upstreamDNS: string, upstreamPort: number)
     // Start the proxy server
     yield* Effect.async<void, Error>((resume) => {
       serverSocket.on("error", (err) => {
-        console.error("Server socket error:", err)
+        Effect.logError("Server socket error", err).pipe(Effect.runPromise)
         resume(Effect.fail(err))
       })
       
       serverSocket.on("message", (queryBuffer, clientRinfo) => {
         Effect.gen(function* () {
-          try {
-            const header = yield* parseHeader(queryBuffer)
-            const questions = yield* parseQuestions(queryBuffer, 12, header.qdcount)
-            
-            // Log query details
-            if (questions.length > 0) {
-              const q = questions[0]
-              console.log(`Query from ${clientRinfo.address}:${clientRinfo.port} - ${q.name} (${getRecordTypeName(q.type)})`)
-            }
-            
-            // Store query info for response matching
-            const query: DNSQuery = {
-              clientRinfo,
-              queryBuffer,
-              timestamp: Date.now()
-            }
-            
-            yield* Ref.update(pendingQueries, (map) => {
-              const newMap = new Map(map)
-              newMap.set(header.id, query)
-              return newMap
+          const header = yield* parseHeader(queryBuffer)
+          const questions = yield* parseQuestions(queryBuffer, 12, header.qdcount)
+          
+          // Log query details
+          if (questions.length > 0) {
+            const q = questions[0]
+            yield* Effect.logInfo("DNS query received", {
+              from: `${clientRinfo.address}:${clientRinfo.port}`,
+              domain: q.name,
+              type: getRecordTypeName(q.type),
+              queryId: header.id
             })
-            
-            // Forward query to upstream DNS
+          }
+          
+          // Store query info for response matching
+          const query: DNSQuery = {
+            clientRinfo,
+            queryBuffer,
+            timestamp: Date.now()
+          }
+          
+          yield* Ref.update(pendingQueries, (map) => {
+            const newMap = new Map(map)
+            newMap.set(header.id, query)
+            return newMap
+          })
+          
+          // Forward query to upstream DNS
+          yield* Effect.async<void, Error>((resume) => {
             clientSocket.send(queryBuffer, upstreamPort, upstreamDNS, (err) => {
               if (err) {
-                console.error("Error forwarding query:", err)
+                resume(Effect.fail(err))
               } else {
-                console.log(`Forwarded query ID ${header.id} to ${upstreamDNS}:${upstreamPort}`)
+                resume(Effect.succeed(undefined))
               }
             })
-          } catch (error) {
-            console.error("Error processing query:", error)
-          }
+          }).pipe(
+            Effect.tap(() =>
+              Effect.logInfo("Query forwarded", {
+                queryId: header.id,
+                to: `${upstreamDNS}:${upstreamPort}`
+              })
+            ),
+            Effect.catchAll((err) =>
+              Effect.logError("Error forwarding query", err)
+            )
+          )
         }).pipe(
+          Effect.catchAll((error) =>
+            Effect.logError("Error processing query", error)
+          ),
           Effect.runPromise
         )
       })
       
       serverSocket.on("listening", () => {
         const address = serverSocket.address()
-        console.log(`DNS proxy listening on ${address.address}:${address.port}`)
-        console.log(`Forwarding queries to ${upstreamDNS}:${upstreamPort}`)
+        Effect.gen(function* () {
+          yield* Effect.logInfo("DNS proxy started", {
+            listening: `${address.address}:${address.port}`,
+            upstream: `${upstreamDNS}:${upstreamPort}`
+          })
+        }).pipe(Effect.runPromise)
         resume(Effect.succeed(undefined))
       })
       
@@ -133,16 +168,24 @@ const createDNSProxy = (port: number, upstreamDNS: string, upstreamPort: number)
     yield* Effect.repeat(
       Effect.gen(function* () {
         const now = Date.now()
+        const removedIds: number[] = []
         yield* Ref.update(pendingQueries, (map) => {
           const newMap = new Map(map)
           for (const [id, query] of newMap) {
             if (now - query.timestamp > 5000) { // 5 second timeout
-              console.warn(`Removing timed out query ID: ${id}`)
+              removedIds.push(id)
               newMap.delete(id)
             }
           }
           return newMap
         })
+        
+        if (removedIds.length > 0) {
+          yield* Effect.logWarning("Removed timed out queries", {
+            queryIds: removedIds,
+            count: removedIds.length
+          })
+        }
       }),
       Schedule.fixed("10 seconds")
     ).pipe(
@@ -166,17 +209,25 @@ const program = Effect.gen(function* () {
     Config.withDefault(53)
   )
   
-  yield* Console.log(`Starting DNS proxy on port ${port}...`)
+  yield* Effect.logInfo("Starting DNS proxy", {
+    port,
+    upstreamDNS,
+    upstreamPort
+  })
   
   yield* createDNSProxy(port, upstreamDNS, upstreamPort)
 }).pipe(
   Effect.catchAllCause((cause) =>
-    Console.error("DNS proxy failed:", cause)
+    Effect.logError("DNS proxy failed", cause)
   )
 )
 
+// Configure pretty logging for better readability
+const layer = Logger.pretty
+
 NodeRuntime.runMain(
   program.pipe(
-    Effect.scoped
+    Effect.scoped,
+    Effect.provide(layer)
   )
 )
