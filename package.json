@@ -1,0 +1,28 @@
+{
+  "name": "udp-echo-server",
+  "version": "1.0.0",
+  "description": "A simple UDP echo server built with Effect JS",
+  "main": "dist/udp-echo-server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node dist/udp-echo-server.js",
+    "dev": "tsx watch src/udp-echo-server.ts",
+    "dns-proxy": "tsx src/dns-proxy.ts",
+    "dns-proxy:dev": "tsx watch src/dns-proxy.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["effect", "udp", "echo", "server"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "effect": "^3.10.0",
+    "@effect/platform": "^0.76.1",
+    "@effect/platform-node": "^0.72.0"
+  }
+}
