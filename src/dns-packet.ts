@@ -1,4 +1,5 @@
-import { Effect } from "effect"
+import { Effect } from "effect";
+import { Buffer } from 'node:buffer';
 
 // DNS Header flags
 export const DNSFlags = {

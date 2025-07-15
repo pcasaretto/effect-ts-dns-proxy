@@ -1,4 +1,5 @@
 import { Effect, Console, Config, Queue, Fiber, Ref, Schedule, Logger, LogLevel } from "effect"
+import { Buffer } from 'node:buffer';
 import * as dgram from "node:dgram"
 import { NodeRuntime } from "@effect/platform-node"
 import { parseHeader, parseQuestions, getRecordTypeName } from "./dns-packet.js"
